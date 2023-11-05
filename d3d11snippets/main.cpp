@@ -2,8 +2,6 @@
 
 #include "main.h"
 
-//#define noexcept
-//#define constexpr
 #define _XM_NO_INTRINSICS_
 #include <DirectXMath.h>
 using namespace DirectX;
@@ -27,6 +25,11 @@ IDXGISwapChain *sc;
 ID3D11Texture2D *backBuffer;
 ID3D11RenderTargetView *renderTargetView;
 
+// depth-stencil buffer
+ID3D11Texture2D *depthStencilTexture;
+ID3D11DepthStencilView *depthStencilView;
+ID3D11DepthStencilState *depthStencilState;
+
 int width = 640;
 int height = 480;
 
@@ -37,6 +40,10 @@ int checkVal = 0;
 	MessageBox(NULL, DXGetErrorString(checkVal), "CHECKOK", MB_OK | MB_ICONERROR); \
 }
 
+#define CHECKOK2(fn, msg) if((checkVal = fn) != S_OK) { \
+	MessageBox(NULL, DXGetErrorString(checkVal), msg, MB_OK | MB_ICONERROR); \
+}
+
 ID3D11RasterizerState *rs;
 
 ID3D11PixelShader *ps;
@@ -45,6 +52,7 @@ ID3D11VertexShader *vs;
 ID3D11InputLayout *layout;
 
 ID3D11Buffer *vb;
+ID3D11Buffer *ib;
 ID3D11Buffer *cb;
 
 int Init(HWND wnd) {
@@ -52,6 +60,7 @@ int Init(HWND wnd) {
 	scdesc.BufferCount = 1;
 	//scdesc.BufferUsage = DXGI_USAGE_BACK_BUFFER;
 	scdesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	//scdesc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 	scdesc.OutputWindow = wnd;
 	scdesc.Windowed = TRUE;
 	scdesc.BufferDesc.Width = width;
@@ -60,26 +69,60 @@ int Init(HWND wnd) {
 	scdesc.SampleDesc.Count = 1;
 	scdesc.SampleDesc.Quality = 0;
 
-	D3D_FEATURE_LEVEL level;
+	D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_9_1;
 
+#ifdef _DEBUG
 	UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED | D3D11_CREATE_DEVICE_DEBUG;
+#else
+	UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED;
+#endif
 	int retVal = 0;
 	if((retVal = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, flags, 0, 0, D3D11_SDK_VERSION, &scdesc, &sc, &dev, &level, &ctx)) != S_OK) {
-		//char str[256] = {0};
-		MessageBox(NULL, DXGetErrorString(retVal), "Error", MB_OK | MB_ICONERROR);
+		MessageBox(NULL, DXGetErrorString(retVal), "D3D11CreateDeviceAndSwapChain", MB_OK | MB_ICONERROR);
 		PostQuitMessage(1);
 		return -1;
 	}
 
+	// backbuffer
 	sc->GetBuffer(0, __uuidof( ID3D11Texture2D ), (LPVOID*) &backBuffer);
-	dev->CreateRenderTargetView(backBuffer, 0, &renderTargetView);
+	CHECKOK2(dev->CreateRenderTargetView(backBuffer, 0, &renderTargetView), "CreateRenderTargetView");
 	backBuffer->Release();
 
-	ctx->OMSetRenderTargets(1, &renderTargetView, 0); // add stencil here?
+	// depth stencil buffer
+	D3D11_TEXTURE2D_DESC depthDesc = { 0 };
+	depthDesc.Width = width;
+	depthDesc.Height = height;
+	depthDesc.MipLevels = 1;
+	depthDesc.ArraySize = 1;
+	depthDesc.SampleDesc.Count = 1;
+	depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+	depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+	depthDesc.Usage = D3D11_USAGE_DEFAULT;
 
-	// viewport
-	D3D11_VIEWPORT vp = {0, 0, width, height, 0, 1};
-	ctx->RSSetViewports(1, &vp);
+	CHECKOK2(dev->CreateTexture2D(&depthDesc, NULL, &depthStencilTexture), "CreateTexture2D (depth-stencil)");
+
+	//D3D11_DEPTH_STENCIL_VIEW_DESC dsvDesc = { 0 };
+	//dsvDesc.Format = depthDesc.Format;
+	//dsvDesc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+
+	//CHECKOK2(dev->CreateDepthStencilView(depthStencilTexture, &dsvDesc, &depthStencilView), "CreateDepthStencilView");
+	CHECKOK2(dev->CreateDepthStencilView(depthStencilTexture, 0, &depthStencilView), "CreateDepthStencilView");
+
+	D3D11_DEPTH_STENCIL_DESC depthStencilDesc = { 0 };
+	depthStencilDesc.DepthEnable = TRUE;
+	depthStencilDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+	depthStencilDesc.DepthFunc = D3D11_COMPARISON_LESS;
+	depthStencilDesc.StencilEnable = FALSE;
+	CHECKOK2(dev->CreateDepthStencilState(&depthStencilDesc, &depthStencilState), "CreateDepthStencilState");
+	
+	depthStencilTexture->Release();
+
+	// set targets // moved to rendern
+	//ctx->OMSetRenderTargets(1, &renderTargetView, depthStencilView); // add stencil here?
+
+	// viewport // moved to render
+	//D3D11_VIEWPORT vp = {0, 0, width, height, 0, 1};
+	//ctx->RSSetViewports(1, &vp);
 
 	// raster state
 	D3D11_RASTERIZER_DESC rsDesc;
@@ -88,22 +131,22 @@ int Init(HWND wnd) {
 	rsDesc.DepthClipEnable = true;
 	rsDesc.FillMode = D3D11_FILL_SOLID;
 	//rsDesc.FrontCounterClockwise = false;
-	CHECKOK(dev->CreateRasterizerState(&rsDesc, &rs));
-	ctx->RSSetState(rs);
+	CHECKOK2(dev->CreateRasterizerState(&rsDesc, &rs), "CreateRasterizerState");
+	//ctx->RSSetState(rs); // moved to render
 
 	ID3DBlob *blob;
 
 	// pixel
-	CHECKOK(D3DReadFileToBlob(L"pixelShader.cso", &blob));
-	CHECKOK(dev->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), 0, &ps));
+	CHECKOK2(D3DReadFileToBlob(L"pixelShader.cso", &blob), "D3DReadFileToBlob pixelShader.cso");
+	CHECKOK2(dev->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), 0, &ps), "CreatePixelShader");
 	blob->Release();
 
 	// vertex
-	CHECKOK(D3DReadFileToBlob(L"vertexShader.cso", &blob));
-	CHECKOK(dev->CreateVertexShader(blob->GetBufferPointer(), blob->GetBufferSize(), 0, &vs));
+	CHECKOK2(D3DReadFileToBlob(L"vertexShader.cso", &blob), "D3DReadFileToBlob vertexShader.cso");
+	CHECKOK2(dev->CreateVertexShader(blob->GetBufferPointer(), blob->GetBufferSize(), 0, &vs), "CreateVertexShader");
 	
 	// input layout (needs vertexshader blob)
-	CHECKOK(dev->CreateInputLayout(vertexDesc, sizeof(vertexDesc)/sizeof(vertexDesc[0]), blob->GetBufferPointer(), blob->GetBufferSize(), &layout));
+	CHECKOK2(dev->CreateInputLayout(vertexDesc, sizeof(vertexDesc)/sizeof(vertexDesc[0]), blob->GetBufferPointer(), blob->GetBufferSize(), &layout), "CreateInputLayout");
 
 	blob->Release();
 
@@ -114,13 +157,24 @@ int Init(HWND wnd) {
 	// create vertexbuffer
 	D3D11_BUFFER_DESC vbDesc = {0};
 	vbDesc.Usage = D3D11_USAGE_DEFAULT;
-	vbDesc.ByteWidth = sizeof(Vertex)*3;
+	vbDesc.ByteWidth = 56 * sizeof(float); //sizeof(cube);// *sizeof(Vertex);
 	vbDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
 
 	D3D11_SUBRESOURCE_DATA vbData = {0};
-	vbData.pSysMem = triangle;
+	vbData.pSysMem = cube;
 
-	CHECKOK(dev->CreateBuffer(&vbDesc, &vbData, &vb));
+	CHECKOK2(dev->CreateBuffer(&vbDesc, &vbData, &vb), "CreateBuffer (vb)");
+
+	// create indexbuffer
+	D3D11_BUFFER_DESC ibDesc = { 0 };
+	ibDesc.Usage = D3D11_USAGE_DEFAULT;
+	ibDesc.ByteWidth = 36*sizeof(short);
+	ibDesc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+
+	D3D11_SUBRESOURCE_DATA ibData = { 0 };
+	ibData.pSysMem = cube_indices;
+
+	CHECKOK2(dev->CreateBuffer(&ibDesc, &ibData, &ib), "CreateBuffer (ib)");
 
 	// create constant buffer
 	D3D11_BUFFER_DESC cbDesc = {0};
@@ -131,7 +185,7 @@ int Init(HWND wnd) {
 
 	D3D11_SUBRESOURCE_DATA cbData = {0};
 	cbData.pSysMem = &matrices;
-	CHECKOK(dev->CreateBuffer(&cbDesc, &cbData, &cb));
+	CHECKOK2(dev->CreateBuffer(&cbDesc, &cbData, &cb), "CreateBuffer (cb)");
 
 	return 0;
 }
@@ -141,12 +195,28 @@ void Release() {
 		cb->Release();
 	}
 
+	if (ib) {
+		ib->Release();
+	}
+
 	if(vb) {
 		vb->Release();
 	}
 
 	if(layout) {
 		layout->Release();
+	}
+
+	if (depthStencilState) {
+		depthStencilState->Release();
+	}
+
+	if (depthStencilTexture) {
+		depthStencilTexture->Release();
+	}
+
+	if (depthStencilView) {
+		depthStencilView->Release();
 	}
 
 	if(ps) {
@@ -179,31 +249,55 @@ void Release() {
 	}
 }
 
+float angle = 0;
+
 void Render() {
+	// rasterizer state
+	ctx->RSSetState(rs);
+
+	// viewport
+	D3D11_VIEWPORT vp = { 0, 0, width, height, 0, 1 };
+	ctx->RSSetViewports(1, &vp);
+
+	// set targets
+	ctx->OMSetRenderTargets(1, &renderTargetView, depthStencilView); // add stencil here?
+	ctx->OMSetDepthStencilState(depthStencilState, FALSE);
+
+	// do render
+
 	float bg[] = {0, 0.2, 0.5, 1.0};
+	ctx->ClearDepthStencilView(depthStencilView, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 	ctx->ClearRenderTargetView(renderTargetView, bg);
 
 	ctx->IASetInputLayout(layout);
 
+	angle++;
+	if (angle >= 360.0f)
+		angle = angle - 360.0f;
+
+	// update matrices
 	D3D11_MAPPED_SUBRESOURCE map = {0};
 	ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map);
 
-	XMMATRIX m = ::XMMatrixIdentity();
+	XMMATRIX m = ::XMMatrixRotationNormal(XMVectorSet(0.25, 0.5, 0.7, 1), XMConvertToRadians(angle)); // ::XMMatrixIdentity();
 	XMMATRIX v = ::XMMatrixLookAtLH(XMVectorSet(0,0,5,0), XMVectorSet(0,0,0,0), XMVectorSet(0,1,0,0));
-	//XMMATRIX p = ::XMMatrixPerspectiveLH(width, height, 0.1f, 100.0f);
 	XMMATRIX p = ::XMMatrixPerspectiveFovLH(XMConvertToRadians(45.0), (float)width/(float)height, 0.1f, 100.0f);
-	//XMMATRIX mvp = m*v*p;
-	XMMATRIX mvp = ::XMMatrixMultiply(v, p);
-	//XMMATRIX mvp = ::XMMatrixMultiply(p, v);
+	XMMATRIX mvp = m*v*p; //XMMATRIX mvp = ::XMMatrixMultiply(v, p);
 	memcpy(map.pData, &mvp, sizeof(float)*16);
 	ctx->Unmap(cb, 0);
 	ctx->VSSetConstantBuffers(0, 1, &cb);
 
+	// draw object
 	UINT32 strides = sizeof(Vertex);
 	UINT32 offsets = 0;
-	ctx->IASetVertexBuffers(0, 1, &vb, &strides, &offsets);
+	/*ctx->IASetVertexBuffers(0, 1, &vb, &strides, &offsets);
 	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	ctx->Draw(3, 0);
+	ctx->Draw(3, 0);*/
+
+	ctx->IASetVertexBuffers(0, 1, &vb, &strides, &offsets);
+	ctx->IASetIndexBuffer(ib, DXGI_FORMAT_R16_UINT, 0); // tegra 3 wants shorts and r16?
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->DrawIndexed(36, 0, 0);
 
 	sc->Present(0, 0); // if vsync present(1, 0)
 }
